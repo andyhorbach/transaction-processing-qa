@@ -70,7 +70,7 @@ This repository is being built incrementally. Current state:
 
 - [x] Risk analysis (`docs/risk-analysis.md`)
 - [x] API contract (`docs/api-contract.md`)
-- [ ] Minimal application under test
+- [x] Minimal application under test (Java 25, Spring Boot, PostgreSQL)
 - [ ] API tests (functional + negative)
 - [ ] Database validation
 - [ ] Idempotency & concurrency tests
@@ -82,9 +82,49 @@ This repository is being built incrementally. Current state:
 ```text
 transaction-processing-qa/
 ├── README.md
-└── docs/
-    ├── risk-analysis.md   ← start here
-    └── api-contract.md    ← resolves the risk analysis's open decisions
+├── docs/
+│   ├── risk-analysis.md   ← start here
+│   └── api-contract.md    ← resolves the risk analysis's open decisions
+├── compose.yaml           ← PostgreSQL for local runs
+├── pom.xml
+└── src/main/              ← the application under test
+    ├── java/io/github/andyhorbach/txnqa/
+    └── resources/db/migration/   ← schema + seeded test users (Flyway)
+```
+
+## Running the application under test
+
+Prerequisites: JDK 25. PostgreSQL comes either from Docker or in-process.
+
+With Docker:
+
+```bash
+docker compose up -d
+./mvnw spring-boot:run
+```
+
+Without Docker (starts a real PostgreSQL in-process via Zonky embedded-postgres):
+
+```bash
+./mvnw spring-boot:run -Dspring-boot.run.profiles=embedded-pg
+```
+
+The API listens on `http://localhost:8080`. Two synthetic users are seeded
+(static bearer tokens, deliberately simple — this system's QA focus is resource
+ownership, not credential management):
+
+| User | Token |
+|---|---|
+| alice | `qa-token-alice` |
+| bob | `qa-token-bob` |
+
+Example:
+
+```bash
+curl -s -X POST localhost:8080/accounts \
+  -H "Authorization: Bearer qa-token-alice" \
+  -H "Content-Type: application/json" \
+  -d '{"currency": "AUD"}'
 ```
 
 ## Author

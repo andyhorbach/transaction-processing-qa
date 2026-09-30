@@ -1,0 +1,9 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: txnqa
+      POSTGRES_USER: txnqa
+      POSTGRES_PASSWORD: txnqa
+    ports:
+      - "5432:5432"

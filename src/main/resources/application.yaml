@@ -1,0 +1,12 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: transaction-processing-qa
+  datasource:
+    url: jdbc:postgresql://localhost:5432/txnqa
+    username: txnqa
+    password: txnqa
+  jackson:
+    property-naming-strategy: SNAKE_CASE
