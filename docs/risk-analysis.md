@@ -2,6 +2,8 @@
 
 This document is the foundation of the test strategy for this project. Every automated test in the repository traces back to a risk listed here. Risks are prioritised by **impact** (what happens if it goes wrong) and **likelihood** (how easily a plausible implementation gets it wrong).
 
+This document deliberately describes **what can go wrong, why it matters, and what must eventually be validated**. Where correct behaviour depends on a design choice that has not been made yet (exact error codes, monetary scale, refund model, …), the choice is not made here — it is listed in [§4 Open decisions](#4-open-decisions-deferred-to-the-api-contract) and will be fixed in the API contract. Tests will then validate the contract against these risks.
+
 Priority scale: **P1** — money loss or data breach; must be covered before anything else. **P2** — incorrect but recoverable behaviour. **P3** — quality/UX issues.
 
 ## 1. Risk inventory
@@ -29,24 +31,26 @@ Priority scale: **P1** — money loss or data breach; must be covered before any
 | R-19 | DB consistency | Transaction status and account balance are mutually inconsistent | Ledger corruption | Medium | P1 |
 | R-20 | DB consistency | Partial update leaves the system in an invalid intermediate state | Corruption after failure | Medium | P1 |
 
-## 2. Expected behaviour by area
+## 2. Invariants and validation needs by area
 
 ### 2.1 Money integrity (R-01 … R-05)
 
 The invariant: **an account balance must equal the sum of its completed transactions applied to the opening balance — at all times, under any concurrency.**
 
-Expected behaviour:
+Why it matters: violations are direct money loss or phantom funds, and they compound silently — a ledger that is wrong by one transaction stays wrong forever unless independently recomputed.
 
-- A `WITHDRAWAL` or `TRANSFER` whose amount exceeds the available balance is rejected with an explicit error; the balance and transaction history are unchanged (no `FAILED` side effects on balance either).
+What must hold and be validated:
+
+- A `WITHDRAWAL` or `TRANSFER` whose amount exceeds the available balance must be rejected; the balance and transaction history remain unchanged.
 - A transaction that ends in `FAILED` leaves the balance exactly as it was before the transaction started.
 - A transaction that ends in `COMPLETED` changes the balance by exactly the transaction amount, exactly once — regardless of retries, crashes, or reprocessing attempts.
-- Two concurrent withdrawals that together exceed the balance must not both complete. One succeeds, one is rejected; the balance never goes negative.
+- Two concurrent withdrawals that together exceed the balance must not both complete; the balance never goes negative.
 
-Test implications: balance assertions before/after every state-changing call; a dedicated concurrent-withdrawal scenario; DB-level recomputation of balance from transaction history as an independent oracle.
+Validation approach: balance assertions before/after every state-changing operation; a dedicated concurrent-withdrawal scenario; DB-level recomputation of balance from transaction history as an independent oracle.
 
 ### 2.2 Transaction state transitions (R-06)
 
-Valid transitions only:
+The defined lifecycle allows exactly these transitions:
 
 ```text
 PENDING     → PROCESSING
@@ -54,59 +58,94 @@ PROCESSING  → COMPLETED
 PROCESSING  → FAILED
 ```
 
-Everything else is invalid — in particular anything *out of* a terminal state (`COMPLETED`, `FAILED`), skipping `PROCESSING`, or moving backwards. An invalid transition attempt must be rejected with an explicit error and must not touch the balance.
+The invariant: **everything else is invalid** — in particular anything *out of* a terminal state (`COMPLETED`, `FAILED`), skipping `PROCESSING`, or moving backwards. An invalid transition attempt must be rejected and must not touch the balance.
 
-Test implications: a transition matrix test — every (from, to) pair is attempted; the valid three succeed, all others are rejected. This is cheaper and more complete than testing transitions ad hoc.
+Why it matters: a transaction that leaves a terminal state can be processed again — which is risk R-04 wearing a different hat.
+
+Validation approach: a transition matrix test — every (from, to) pair is attempted; the valid three succeed, all others are rejected. This is cheaper and more complete than testing transitions ad hoc.
 
 ### 2.3 Idempotency (R-07 … R-09)
 
-The contract:
+The invariants:
 
-- Retrying a request with the **same idempotency key and the same payload** returns the original result and creates **no** second transaction.
-- Reusing an existing key with a **different payload** is a client error — the system must detect the mismatch and reject the request explicitly (not silently return the old result, not execute the new payload).
-- **Concurrent** requests with the same key must result in exactly one processed transaction; the loser either receives the winner's result or a well-defined conflict error.
+- Retrying a request with the **same idempotency key and the same payload** must not create a second transaction or apply its effects twice.
+- Reusing an existing key with a **different payload** must never silently execute either payload — the mismatch must be detected and surfaced explicitly. (How exactly it is surfaced is a contract decision — see §4.)
+- **Concurrent** requests with the same key must result in exactly one processed transaction. (What the "losing" request receives is a contract decision — see §4.)
 
-Test implications: sequential retry tests, payload-mismatch negative tests, and a parallel-duplicate test asserting exactly one row in the transaction table per key.
+Why it matters: retries are not an edge case — clients, gateways, and networks retry as normal operation. A system that is only correct without retries is not correct.
+
+Validation approach: sequential retry tests, payload-mismatch negative tests, and a parallel-duplicate test asserting exactly one transaction row per key.
 
 ### 2.4 Currency and monetary precision (R-10 … R-12)
 
-- The transaction currency must match the account currency; mismatches are rejected (this synthetic system does not perform FX conversion).
-- Unsupported currency codes are rejected on input validation.
-- All monetary amounts use exact decimal arithmetic (e.g. `DECIMAL` in the DB, `BigDecimal`-style types in code) — never binary floating point.
-- Precision is explicit: amounts have a defined scale (2 decimal places for the supported fiat currencies); inputs exceeding the scale are rejected, not silently rounded.
+The invariants:
 
-Test implications: boundary tests at the scale limit (e.g. `10.001`), classic float-trap amounts (`0.1 + 0.2`), and DB column type verification.
+- A transaction in a currency that does not match the account currency must not be booked as-is (this synthetic system does not perform FX conversion).
+- Unsupported or malformed currency codes must be rejected on input.
+- Monetary amounts must use exact decimal arithmetic end to end; binary floating point must not appear anywhere in the money path (API, application code, or DB column types).
+- The precision/scale of amounts must be explicitly defined and identical across API and DB; input that exceeds it must be handled by an explicit, documented rule — never silently altered. (The scale itself and the handling rule are contract decisions — see §4.)
+
+Why it matters: float-based money drifts by fractions of a cent per operation and by real money at volume; undefined precision produces API/DB disagreements that look like R-18 but are design defects.
+
+Validation approach: boundary tests at the scale limit, classic float-trap amounts (e.g. `0.1 + 0.2`), and verification of DB column types.
 
 ### 2.5 Refunds (R-13 … R-15)
 
-- A `REFUND` must reference an existing `COMPLETED` transaction of a refundable type.
-- The refunded amount must not exceed the original transaction amount. If partial refunds are supported, the *sum* of refunds against one transaction must not exceed the original amount; if not supported, the second refund attempt is rejected outright. The choice must be explicit in the API contract — "unspecified" is a defect.
-- Refund completion must atomically update both the refund transaction and the account balance.
+The invariants:
 
-Test implications: over-refund attempts, double-refund attempts (sequential and concurrent), refund-of-failed-transaction attempts.
+- A `REFUND` must reference an existing `COMPLETED` transaction of a refundable type.
+- The total refunded against one transaction must never exceed the original transaction amount — regardless of whether refunds are full-only or partial (which model applies is a contract decision — see §4).
+- Whether repeat refund attempts are possible at all follows from that same model; either way, over-refunding must be impossible, including under concurrent refund attempts.
+- Refund completion must leave the refund transaction and the account balance consistent with each other.
+
+Why it matters: refunds are the classic double-spend vector — they move money based on *history*, so any ambiguity about that history becomes money loss.
+
+Validation approach: over-refund attempts, repeat-refund attempts (sequential and concurrent), refund-of-failed-transaction attempts — all derived from whichever refund model the contract fixes.
 
 ### 2.6 Authorization (R-16, R-17)
 
-- Every account- and transaction-scoped endpoint must verify resource ownership, not just authentication.
-- User A requesting user B's account or transaction by ID receives `404` or `403` (the choice must be consistent — `404` avoids resource-existence disclosure) and never the resource body.
-- User A must not be able to create, process, or refund transactions on user B's account.
+The invariants:
 
-Test implications: a two-user fixture is a baseline requirement of the test data design; every resource endpoint gets a cross-user negative test. These tests are cheap and catch a disproportionately expensive class of defects (IDOR).
+- Every account- and transaction-scoped operation must verify resource **ownership**, not just authentication.
+- A user requesting another user's account or transaction must never receive the resource body, and the error behaviour must not leak information (e.g. by differing between "exists but forbidden" and "does not exist"). (The exact status-code convention is a contract decision — see §4.)
+- A user must not be able to create, process, or refund transactions on another user's account.
+
+Why it matters: this defect class (IDOR) is a data breach and, combined with write operations, money theft. It is also disproportionately common because authorization is easy to implement per-endpoint and forget per-resource.
+
+Validation approach: a two-user fixture as a baseline of the test data design; every resource endpoint gets a cross-user negative test, read and write.
 
 ### 2.7 Database consistency (R-18 … R-20)
 
-- After any API operation, the database must reflect exactly what the API reported: same status, same amounts, same balances.
-- There must be no observable intermediate state in which a transaction is `COMPLETED` but the balance is not yet updated (or vice versa) — status change and balance change are one atomic unit.
-- A failure mid-operation (simulated where possible) must leave either the complete old state or the complete new state — never a mix.
+The invariants:
 
-Test implications: API tests are paired with direct SQL assertions; a consistency check recomputes each account balance from its transaction history and compares with the stored balance — usable both as a test oracle and as a production-style data quality check.
+- After any API operation, the database must reflect exactly what the API reported: same status, same amounts, same balances.
+- Transaction status change and balance change are one atomic unit — no observable state where one has happened and the other has not.
+- A failure mid-operation must leave either the complete old state or the complete new state, never a mix.
+
+Why it matters: API-vs-DB disagreement is corruption that no API-level test can see — which is precisely why the test strategy must not be API-only.
+
+Validation approach: API tests paired with direct SQL assertions; a consistency check that recomputes each account balance from its transaction history and compares it with the stored balance — usable both as a test oracle and as a production-style data quality check.
 
 ## 3. What is deliberately out of scope
 
-To keep the system reviewable, the following are explicitly not modelled: FX conversion, multi-leg transfers, fees calculation logic, batch settlement, and regulatory reporting. Each would add real-world risks, but none is needed to demonstrate the QA reasoning above.
+To keep the system reviewable, the following are explicitly not modelled: FX conversion, multi-leg transfers, fee calculation logic, batch settlement, and regulatory reporting. Each would add real-world risks, but none is needed to demonstrate the QA reasoning above.
 
-## 4. How this document is used
+## 4. Open decisions deferred to the API contract
+
+These choices affect how the risks above manifest and how the tests will assert. They are intentionally **not** decided in this document; the API contract will fix each one, and the tests will validate the contract.
+
+| # | Decision | Related risks |
+|---|---|---|
+| D-1 | Error semantics for cross-user access (e.g. `403` vs `404`; must be consistent and non-leaking) | R-16, R-17 |
+| D-2 | Supported currency set | R-10 |
+| D-3 | Monetary scale per currency, and the rule for over-precise input (reject vs defined rounding) | R-11, R-12 |
+| D-4 | Refund model: full-only vs partial refunds | R-13, R-14 |
+| D-5 | Response to idempotency-key reuse with a different payload | R-08 |
+| D-6 | Behaviour of the losing concurrent duplicate request (replay original response vs conflict error) | R-09 |
+
+## 5. How this document is used
 
 - Every automated test names the risk ID(s) it covers.
 - Test review starts from this table: an uncovered P1 risk is a gap; a test that maps to no risk is a candidate for deletion.
 - When a defect is found, it is traced back here — either to a covered risk (test gap analysis) or to a missing risk (this document gets updated first, then the test is added).
+- When an open decision from §4 is resolved in the API contract, the affected tests assert the contracted behaviour; this document keeps stating only the underlying risk.
