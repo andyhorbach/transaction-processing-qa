@@ -69,8 +69,8 @@ The full risk inventory with expected behaviour lives in [`docs/risk-analysis.md
 This repository is being built incrementally. Current state:
 
 - [x] Risk analysis (`docs/risk-analysis.md`)
+- [x] API contract (`docs/api-contract.md`)
 - [ ] Minimal application under test
-- [ ] API contract
 - [ ] API tests (functional + negative)
 - [ ] Database validation
 - [ ] Idempotency & concurrency tests
@@ -83,7 +83,8 @@ This repository is being built incrementally. Current state:
 transaction-processing-qa/
 ├── README.md
 └── docs/
-    └── risk-analysis.md   ← start here
+    ├── risk-analysis.md   ← start here
+    └── api-contract.md    ← resolves the risk analysis's open decisions
 ```
 
 ## Author
