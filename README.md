@@ -25,14 +25,19 @@ Most QA demo repositories show *tool usage* — a Selenium suite here, a Postman
 
 ## System under test
 
-A minimal transaction-processing service with three entities:
+A minimal transaction-processing service with three core entities, plus a separate idempotency record:
 
 ```text
 User
  └── Account (id, user_id, currency, balance, status)
       └── Transaction (id, account_id, type, amount, currency,
-                       status, idempotency_key, created_at)
+                       status, original_transaction_id, created_at)
+
+IdempotencyRecord (user_id, idempotency_key, request_hash,
+                   in_flight, transaction_id, created_at)
 ```
+
+`original_transaction_id` is set only for `REFUND` transactions. Idempotency keys are not stored on the transaction itself: they live in the separate `idempotency_record` table, scoped per user, which links each successfully used key to the transaction it created.
 
 Transaction types: `DEPOSIT`, `WITHDRAWAL`, `REFUND`, `FEE` (`TRANSFER` is deliberately deferred — see api-contract.md §7 for why a cheap single-sided design would violate the ledger invariant).
 
@@ -52,7 +57,7 @@ The system is intentionally small. The interesting part is not the implementatio
 
 **64 executed tests/cases, all passing** (37 test methods; 3 of them parameterized, expanding to 30 cases). All currently implemented risk-mapped scenarios pass, and the suite has found no application defect so far — which is a statement about these scenarios, not a proof of absence of defects.
 
-Every test names the risk ID(s) it covers in its `@DisplayName`; the full risk inventory lives in [`docs/risk-analysis.md`](docs/risk-analysis.md).
+Each test's display name identifies what it covers: a risk ID (e.g. `R-04`), a contract decision (e.g. `D-6`), or a contract section (e.g. `Contract 3.4`); the end-to-end journeys name the risks they complement. The full risk inventory lives in [`docs/risk-analysis.md`](docs/risk-analysis.md), and the decisions and sections in [`docs/api-contract.md`](docs/api-contract.md).
 
 | Suite | Risks | What it demonstrates |
 |---|---|---|
