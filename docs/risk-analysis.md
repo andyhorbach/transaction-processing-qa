@@ -1,6 +1,6 @@
 # Risk Analysis — Transaction Processing System
 
-This document is the foundation of the test strategy for this project. Every automated test in the repository traces back to a risk listed here. Risks are prioritised by **impact** (what happens if it goes wrong) and **likelihood** (how easily a plausible implementation gets it wrong).
+This document is the foundation of the test strategy for this project. Every automated test in the repository traces back to a risk listed here, either directly or through the contract decision or section it verifies. Risks are prioritised by **impact** (what happens if it goes wrong) and **likelihood** (how easily a plausible implementation gets it wrong).
 
 This document deliberately describes **what can go wrong, why it matters, and what must eventually be validated**. Where correct behaviour depends on a design choice that has not been made yet (exact error codes, monetary scale, refund model, …), the choice is not made here — it is listed in [§4 Open decisions](#4-open-decisions-deferred-to-the-api-contract) and will be fixed in the API contract. Tests will then validate the contract against these risks.
 
@@ -30,6 +30,9 @@ Priority scale: **P1** — money loss or data breach; must be covered before any
 | R-18 | DB consistency | API response state disagrees with database state | Undetectable corruption | Medium | P2 |
 | R-19 | DB consistency | Transaction status and account balance are mutually inconsistent | Ledger corruption | Medium | P1 |
 | R-20 | DB consistency | Partial update leaves the system in an invalid intermediate state | Corruption after failure | Medium | P1 |
+| R-21 | Lifecycle authorization | A party without processing authority (e.g. the account owner) drives the transaction lifecycle — such as completing their own deposit | Money creation | High | P1 — accepted, not mitigated (see §2.8) |
+| R-22 | Input handling | Malformed, wrongly typed, or out-of-range input causes an uncontrolled server error or is silently coerced instead of being rejected | Reliability; unsafe coercion in the money path | High | P2 |
+| R-23 | Refunds | Concurrent refunds against the same original block each other, so a valid refund can never complete | Refund cannot make progress | Medium | P2 |
 
 ## 2. Invariants and validation needs by area
 
@@ -102,6 +105,10 @@ Why it matters: refunds are the classic double-spend vector — they move money 
 
 Validation approach: over-refund attempts, repeat-refund attempts (sequential and concurrent), refund-of-failed-transaction attempts — all derived from whichever refund model the contract fixes.
 
+**Refund progress (R-23).** Preventing over-refunds is not sufficient on its own: the mechanism that prevents them must not also prevent *valid* refunds from completing. If concurrent refunds can together reserve more than the original amount, a cap check can reject every one of them, leaving each refund permanently blocked even though one of them would fit. The invariant: **every refund the system accepts must be able to complete**, and concurrent refund attempts must resolve to an outcome in which the refunds that fit can complete. (Where the cap is enforced is a contract decision — see §4.)
+
+Validation approach: concurrent full-refund attempts against one original, asserting not only that no over-refund occurs but which attempts are accepted, and that each accepted refund then completes.
+
 ### 2.6 Authorization (R-16, R-17)
 
 The invariants:
@@ -126,6 +133,26 @@ Why it matters: API-vs-DB disagreement is corruption that no API-level test can 
 
 Validation approach: API tests paired with direct SQL assertions; a consistency check that recomputes each account balance from its transaction history and compares it with the stored balance — usable both as a test oracle and as a production-style data quality check.
 
+### 2.8 Lifecycle authorization (R-21)
+
+The risk: transaction lifecycle transitions — in particular completing a transaction, which is the step that moves money — are performed by a party that has no authority to process payments. In a real system, completion belongs to an internal processor or settlement step; a customer able to complete their own deposit can create money.
+
+Why it matters: this is the most direct money-creation path in the domain, and ownership checks (§2.6) do not address it — the owner is authorized to *see* the transaction, not to *settle* it.
+
+Status: **accepted, not mitigated.** The synthetic system deliberately lets the resource owner drive transitions, so that lifecycle, retry, and concurrency behaviour can be tested through the public API. This is a documented scope decision, not an oversight (see the API contract, D-11). Per §5, an accepted P1 risk is listed explicitly so that it reads as a decision rather than as an untested gap.
+
+### 2.9 Input handling (R-22)
+
+The invariants:
+
+- Input that is malformed, of the wrong JSON type, or outside the permitted range must be rejected with a controlled client error — never with an unhandled server error, and never by reaching the database and failing there.
+- Input must not be silently coerced into a different type or value; in particular, monetary amounts must not pass through binary floating point on their way in (this overlaps R-11 at the transport layer).
+- Error responses must not expose internal details.
+
+Why it matters: an input that produces a 5xx is both a reliability defect and an information-disclosure channel; silent coercion means the system acts on something the client did not literally send. (The exact accepted types, format, and bounds are contract decisions — see §4.)
+
+Validation approach: wrong-type inputs (numbers, booleans, null where a string is required), malformed formats, values just inside and just outside each bound, and values beyond what the storage layer can hold — each asserted to return the contracted client error.
+
 ## 3. What is deliberately out of scope
 
 To keep the system reviewable, the following are explicitly not modelled: FX conversion, multi-leg transfers, fee calculation logic, batch settlement, and regulatory reporting. Each would add real-world risks, but none is needed to demonstrate the QA reasoning above.
@@ -143,9 +170,11 @@ These choices affect how the risks above manifest and how the tests will assert.
 | D-5 | Response to idempotency-key reuse with a different payload | R-08 |
 | D-6 | Behaviour of the losing concurrent duplicate request (replay original response vs conflict error) | R-09 |
 
+Further decisions were identified during contract design and later reviews; they are stated and resolved in the API contract rather than repeated here: D-7 (refund eligibility), D-8 (replay content — open), D-9 (where the refund cap is enforced — R-14, R-23), D-10 (amount wire format and bounds — R-11, R-12, R-22), D-11 (who drives the lifecycle — R-21), D-12 (idempotency fingerprint scope — R-08), and D-13 (in-flight key expiry and creation/binding atomicity — deferred with R-20).
+
 ## 5. How this document is used
 
-- Every automated test names the risk ID(s) it covers.
-- Test review starts from this table: an uncovered P1 risk is a gap; a test that maps to no risk is a candidate for deletion.
+- Each automated test identifies what it covers in its name: a risk ID, a contract decision, or a contract section — each of which traces back to risks in this document.
+- Test review starts from this table: an uncovered P1 risk is a gap; a test that maps to no risk is a candidate for deletion. A risk explicitly marked *accepted, not mitigated* (currently R-21) is a documented scope decision, not a gap.
 - When a defect is found, it is traced back here — either to a covered risk (test gap analysis) or to a missing risk (this document gets updated first, then the test is added).
 - When an open decision from §4 is resolved in the API contract, the affected tests assert the contracted behaviour; this document keeps stating only the underlying risk.
