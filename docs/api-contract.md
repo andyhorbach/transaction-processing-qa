@@ -26,7 +26,7 @@ This contract defines the minimal API needed to exercise the risks in [`risk-ana
 | D-4 | Refund model | **Partial refunds allowed.** Sum of all non-`FAILED` refunds against one original ≤ original amount | Richer risk surface (sum cap, concurrent partials); pending refunds count toward the cap to close the concurrent over-refund hole (R-13, R-14) |
 | D-5 | Idempotency-key reuse with different payload | **`409 IDEMPOTENCY_KEY_REUSE`**, no execution of either payload | Ambiguous intent must fail loudly (R-08) |
 | D-6 | Concurrent duplicate requests | **Exactly one request executes.** Original finished → replay stored response with header `Idempotency-Replay: true`. Original still in flight → `409 DUPLICATE_REQUEST_IN_PROGRESS` (retryable) | Replay gives clients safety; the in-flight conflict is honest and testable (R-07, R-09) |
-| D-7 | Refund eligibility | **Only `COMPLETED` transactions of debit types (`WITHDRAWAL`, `FEE`) are refundable.** `DEPOSIT` and `REFUND` transactions are not refundable | A refund returns previously debited funds. Refunding a credit (`DEPOSIT`, `REFUND`) would allow refund-of-refund chains — a money-creation loop (R-13, R-14); reversing a deposit is a different operation (a withdrawal), not a refund |
+| D-7 | Refund eligibility | **Only `COMPLETED` transactions of debit types (`WITHDRAWAL`, `FEE`) are refundable, and only on the account the original transaction belongs to.** `DEPOSIT` and `REFUND` transactions are not refundable | A refund returns previously debited funds. Refunding a credit (`DEPOSIT`, `REFUND`) would allow refund-of-refund chains — a money-creation loop (R-13, R-14); reversing a deposit is a different operation (a withdrawal), not a refund |
 
 ## 3. Endpoints
 
@@ -71,7 +71,7 @@ Creation-time (advisory) checks:
 
 - `currency` ≠ account currency → `422 CURRENCY_MISMATCH`
 - debit types (`WITHDRAWAL`, `FEE`) with amount > balance → `422 INSUFFICIENT_FUNDS`
-- `REFUND`: original must be an owned, `COMPLETED`, refundable-type transaction per D-7 → else `422 REFUND_NOT_ALLOWED`; amount over remaining refundable → `422 REFUND_EXCEEDS_ORIGINAL`
+- `REFUND`: original must be a `COMPLETED`, refundable-type transaction per D-7 belonging to **the same account as the request path (`accountId`)** → else `422 REFUND_NOT_ALLOWED`; amount over remaining refundable → `422 REFUND_EXCEEDS_ORIGINAL`
 - Idempotency per D-5/D-6.
 
 (R-01, R-07…R-14, R-17)
@@ -95,6 +95,7 @@ Body: `{ "to": "PROCESSING | COMPLETED | FAILED" }`
 - **Balance effects apply only at the `PROCESSING→COMPLETED` transition.** `PENDING`, `PROCESSING`, and `FAILED` transactions never affect a balance (R-02).
 - Effect per type on `COMPLETED`: `DEPOSIT` +amount · `WITHDRAWAL` −amount · `FEE` −amount · `REFUND` +amount.
 - **`FEE` is a plain account debit with no destination or beneficiary account in this synthetic system.** It exists to provide a second debit type (for refund-eligibility and mixed-history testing) without introducing another ledger model.
+- **Refund scope:** a `REFUND` may only reference an original transaction on the same account it is created on. A same-user-but-different-account original is rejected with `422 REFUND_NOT_ALLOWED`, exactly like a foreign or absent one. Rationale: a refund returns funds to the account that was debited; without this rule a caller could refund one account's transaction into another account, which both distorts each account's ledger history and widens the attack surface of the refund path.
 - Creation-time checks are advisory (fast client feedback); completion-time checks are authoritative and atomic. The window between them is a **deliberate test surface**: two withdrawals may both pass creation, but concurrent completion must let exactly one succeed (R-05).
 
 ### 4.1 Insufficient funds at completion
@@ -110,11 +111,13 @@ The same pattern applies to `REFUND` completion when the refund cap (D-4) would 
 
 ## 5. Idempotency semantics
 
-- Key scope: per user. The stored record binds key → request hash + response.
-- Same key + same payload, original finished → replayed stored response, `Idempotency-Replay: true`, no new transaction.
-- Same key + different payload → `409 IDEMPOTENCY_KEY_REUSE` (D-5).
-- Same key, original in flight → `409 DUPLICATE_REQUEST_IN_PROGRESS` (D-6).
-- Keys apply to transaction creation only (the money-moving POST); transitions are guarded by the state matrix instead.
+- Idempotency applies to **transaction creation only** (`POST /accounts/{accountId}/transactions` — the money-moving request). It is not a global mechanism: transitions are guarded by the state matrix instead, and the other endpoints are reads.
+- Key scope: per user.
+- **A key is bound only by successful creation (`201`).** A rejected creation (any 4xx) does not reserve the key: the same key may be retried after the request is corrected or the precondition is satisfied (e.g. after funding the account). While a request is in flight, the key is temporarily claimed (see the in-flight rule below).
+- Once a key is bound to a created transaction:
+  - same key + same payload → the original `201` response is replayed with header `Idempotency-Replay: true`; no new transaction is created;
+  - same key + different payload → `409 IDEMPOTENCY_KEY_REUSE` (D-5).
+- Same key + same payload while the original request is still in flight → `409 DUPLICATE_REQUEST_IN_PROGRESS` (D-6). A **differing** payload is reported as `409 IDEMPOTENCY_KEY_REUSE` even while the original is in flight — the payload mismatch is the more informative error and is detected first.
 
 ## 6. Error codes
 
@@ -128,7 +131,7 @@ The same pattern applies to `REFUND` completion when the refund cap (D-4) would 
 | `DUPLICATE_REQUEST_IN_PROGRESS` | 409 | Concurrent duplicate, original in flight |
 | `INSUFFICIENT_FUNDS` | 422 | Debit exceeds balance (at creation, or authoritatively at completion — §4.1) |
 | `CURRENCY_MISMATCH` | 422 | Transaction currency ≠ account currency |
-| `REFUND_NOT_ALLOWED` | 422 | Original not refundable per D-7 (wrong type, status, or ownership) |
+| `REFUND_NOT_ALLOWED` | 422 | Original not refundable per D-7 (wrong type, wrong status, or not on this account) |
 | `REFUND_EXCEEDS_ORIGINAL` | 422 | Refund sum would exceed original (at creation, or authoritatively at completion — §4.1) |
 
 ## 7. Deferred to a later evolution
