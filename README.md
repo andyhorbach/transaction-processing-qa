@@ -71,11 +71,17 @@ This repository is being built incrementally. Current state:
 - [x] Risk analysis (`docs/risk-analysis.md`)
 - [x] API contract (`docs/api-contract.md`)
 - [x] Minimal application under test (Java 25, Spring Boot, PostgreSQL)
-- [ ] API tests (functional + negative)
-- [ ] Database validation
-- [ ] Idempotency & concurrency tests
+- [x] API tests (functional + negative), risk-traceable (RestAssured + JUnit 5)
+- [x] Database validation (independent ledger oracle, R-18/R-19)
+- [x] Idempotency & concurrency tests (parallel requests, full decision table)
 - [ ] E2E scenarios
 - [ ] CI pipeline
+
+Run the suite (no Docker needed — tests start the app against an in-process PostgreSQL):
+
+```bash
+./mvnw test
+```
 
 ## Repository structure
 

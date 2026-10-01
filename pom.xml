@@ -64,6 +64,19 @@
             <artifactId>embedded-postgres</artifactId>
             <version>2.2.2</version>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 6.x targets Groovy 5, matching the Groovy that Spring Boot 4's BOM manages;
+             RestAssured 5.x (Groovy 4) breaks at runtime against Groovy 5. -->
+        <dependency>
+            <groupId>io.rest-assured</groupId>
+            <artifactId>rest-assured</artifactId>
+            <version>6.0.1</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
