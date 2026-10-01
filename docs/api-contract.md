@@ -119,6 +119,10 @@ The same pattern applies to `REFUND` completion when the refund cap (D-4) would 
   - same key + different payload → `409 IDEMPOTENCY_KEY_REUSE` (D-5).
 - Same key + same payload while the original request is still in flight → `409 DUPLICATE_REQUEST_IN_PROGRESS` (D-6). A **differing** payload is reported as `409 IDEMPOTENCY_KEY_REUSE` even while the original is in flight — the payload mismatch is the more informative error and is detected first.
 
+### Known ambiguity — replay content (D-8 candidate)
+
+The replay rule above says "the original `201` response is replayed". The current implementation re-reads the created transaction and returns its **current** state: a creation retried after the transaction has already progressed (e.g. to `COMPLETED`) replays with the current status, not a snapshot of the original `PENDING` response. Both readings are defensible — a stored snapshot gives byte-stable replays; current-state replay never serves stale data. This is an open contract decision, not a defect: it will be resolved explicitly as D-8 before any test asserts either behaviour, and the implementation stays as-is until then.
+
 ## 6. Error codes
 
 | Code | HTTP | Trigger |

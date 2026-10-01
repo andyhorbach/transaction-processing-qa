@@ -4,6 +4,14 @@ A synthetic transaction-processing system built specifically as a **QA portfolio
 
 > **Note:** This is a synthetic system designed for this portfolio. It contains no code, data, requirements, or documentation from any employer or real product.
 
+## Five-minute tour
+
+For a reviewer short on time, this path shows the core of the project:
+
+1. [`docs/risk-analysis.md`](docs/risk-analysis.md) §1 — what can go wrong with money and why each risk is ranked the way it is.
+2. [`docs/api-contract.md`](docs/api-contract.md) §2 — the explicit decisions (D-1…D-7) that resolve the risk document's open questions, each with rationale.
+3. [`StateTransitionMatrixTest`](src/test/java/io/github/andyhorbach/txnqa/api/StateTransitionMatrixTest.java) and [`LedgerOracle`](src/test/java/io/github/andyhorbach/txnqa/api/LedgerOracle.java) — how the tests keep their expectations independent of the implementation they verify.
+
 ## Why this project exists
 
 Most QA demo repositories show *tool usage* — a Selenium suite here, a Postman collection there. This project instead shows *test reasoning*:
@@ -26,7 +34,7 @@ User
                        status, idempotency_key, created_at)
 ```
 
-Transaction types: `DEPOSIT`, `WITHDRAWAL`, `TRANSFER`, `REFUND`, `FEE`
+Transaction types: `DEPOSIT`, `WITHDRAWAL`, `REFUND`, `FEE` (`TRANSFER` is deliberately deferred — see api-contract.md §7 for why a cheap single-sided design would violate the ledger invariant).
 
 Transaction lifecycle:
 
@@ -40,48 +48,62 @@ PROCESSING
 
 The system is intentionally small. The interesting part is not the implementation — it is what can go wrong with money when the implementation is careless.
 
-## QA concerns demonstrated
+## Test suite
 
-| Area | Examples |
-|---|---|
-| Money integrity | Overdraft rejection, exactly-once balance mutation, no double spending under concurrency |
-| State transitions | Only valid lifecycle transitions accepted; terminal states are terminal |
-| Idempotency | Safe retries, key-reuse with different payload, concurrent duplicate requests |
-| Currency & precision | Currency validation, decimal precision policy, no floating-point money math |
-| Refunds | Amount caps, double-refund prevention, balance consistency |
-| Authorization | Account/transaction ownership isolation between users |
-| Database consistency | API state vs. DB state agreement, no partial updates |
+**64 executed tests/cases, all passing** (37 test methods; 3 of them parameterized, expanding to 30 cases). All currently implemented risk-mapped scenarios pass, and the suite has found no application defect so far — which is a statement about these scenarios, not a proof of absence of defects.
 
-The full risk inventory with expected behaviour lives in [`docs/risk-analysis.md`](docs/risk-analysis.md) — it is the source document from which all tests in this repository are derived.
+Every test names the risk ID(s) it covers in its `@DisplayName`; the full risk inventory lives in [`docs/risk-analysis.md`](docs/risk-analysis.md).
 
-## Planned testing layers
-
-| Layer | Purpose | Tooling (planned) |
+| Suite | Risks | What it demonstrates |
 |---|---|---|
-| API contract & functional tests | Validate business rules at the API boundary, including negative paths | Java + RestAssured |
-| Database validation | Verify DB state agrees with API responses; catch partial updates | SQL assertions alongside API tests |
-| Idempotency & concurrency tests | Duplicate and parallel requests must not duplicate effects | Targeted concurrent test scenarios |
-| A small set of E2E flows | Full user journeys across several operations | Kept deliberately few and meaningful |
-| CI quality gate | Every change runs the suite; failures block merge | GitHub Actions |
+| `MoneyIntegrityTest` | R-01…R-05 | Overdraft guards at creation and (authoritatively) at completion; exactly-once balance effects; true-parallel double-spend attempt |
+| `StateTransitionMatrixTest` | R-06 | All 16 lifecycle (from → to) pairs as one parameterized test; rejected transitions provably change nothing |
+| `IdempotencyTest` | R-07…R-09 | The complete key-state × payload decision table, incl. 5 parallel requests with one key |
+| `ValidationTest` | R-10…R-12 | Currency rules, monetary precision boundaries (incl. the `0.10 + 0.20` float trap), DB column scale, input contract |
+| `RefundTest` | R-13…R-15 | Refund caps with pending refunds counted, concurrent refund attempts, eligibility rules (D-7) |
+| `AuthorizationTest` | R-16, R-17 | Cross-tenant reads *and* writes rejected; foreign resources byte-for-byte indistinguishable from absent ones (D-1) |
+| `DatabaseConsistencyTest` | R-18, R-19 | API/DB agreement per field; the independent ledger oracle |
+| `EndToEndJourneyTest` | journey-level | Three multi-step journeys over cumulative state (below) |
 
-## Project status
-
-This repository is being built incrementally. Current state:
-
-- [x] Risk analysis (`docs/risk-analysis.md`)
-- [x] API contract (`docs/api-contract.md`)
-- [x] Minimal application under test (Java 25, Spring Boot, PostgreSQL)
-- [x] API tests (functional + negative), risk-traceable (RestAssured + JUnit 5)
-- [x] Database validation (independent ledger oracle, R-18/R-19)
-- [x] Idempotency & concurrency tests (parallel requests, full decision table)
-- [ ] E2E scenarios
-- [ ] CI pipeline
-
-Run the suite (no Docker needed — tests start the app against an in-process PostgreSQL):
+Run it (no Docker needed — the suite starts the app against a real in-process PostgreSQL):
 
 ```bash
 ./mvnw test
 ```
+
+### Test design principles
+
+- **Independent oracle:** `LedgerOracle` recomputes each balance from the `COMPLETED` history per the *contract's* effect rules. The application never computes balances that way (it mutates incrementally), so the same bug cannot pass on both sides.
+- **Expectations come from the contract, not the code:** the valid-transition set and all journey end balances are hardcoded from `api-contract.md`, never derived from production enums or logic.
+- **Real concurrency:** double-spend, idempotency-race, and refund-race tests fire actual parallel requests released by a barrier.
+- **Isolation by fixture design:** every test creates its own accounts; nothing depends on execution order.
+- There are deliberately **no unit tests**: this project is a black-box API/integration QA exercise — the system is validated through its public contract and its database, the way a QA engineer meets a real service — not because unit testing is overlooked.
+
+### End-to-end journeys
+
+The three journeys in `EndToEndJourneyTest` are complementary coverage over the risk-mapped suites: they assert *cumulative* state across realistic multi-step lifecycles, which single-risk tests structurally cannot. They do not by themselves prove any risk.
+
+1. **Customer lifecycle** — open → fund → spend (withdrawal + fee) → one failed attempt → partial refund; final balance, exact history count and order, oracle, and API/DB agreement all verified against hand-computed values.
+2. **Unreliable client** — the same lifecycle where *every* step is retried: creations with the same idempotency key (must replay), transitions re-sent (answered by the state matrix), and a completion retried through an insufficient-funds rejection until funds arrive. Exactly one transaction per logical operation at the end.
+3. **Concurrent tenants** — two users run their journeys simultaneously; isolation is probed mid-journey at every stage (foreign reads and writes must 404), and each tenant's ledger is verified independently.
+
+## Project status
+
+Implemented and verified:
+
+- [x] Risk analysis (`docs/risk-analysis.md`)
+- [x] API contract (`docs/api-contract.md`) — resolves decisions D-1…D-7; one documented open ambiguity (D-8 candidate, see contract §5)
+- [x] Minimal application under test (Java 25, Spring Boot, PostgreSQL)
+- [x] API tests (functional + negative), risk-traceable (RestAssured + JUnit 5)
+- [x] Database validation (independent ledger oracle, R-18/R-19)
+- [x] Idempotency & concurrency tests (parallel requests, full decision table)
+- [x] E2E journeys (3 multi-step scenarios)
+
+Remaining work and deliberate gaps:
+
+- [ ] CI quality gate (GitHub Actions) — intentionally after the test pyramid, so it gates a real test architecture rather than decorating it
+- [ ] R-20 (partial update on mid-operation failure) needs fault injection inside the DB transaction; out of scope for a black-box suite and documented as a gap, not an oversight
+- [ ] Performance/load testing — not started
 
 ## Repository structure
 
@@ -89,13 +111,25 @@ Run the suite (no Docker needed — tests start the app against an in-process Po
 transaction-processing-qa/
 ├── README.md
 ├── docs/
-│   ├── risk-analysis.md   ← start here
-│   └── api-contract.md    ← resolves the risk analysis's open decisions
-├── compose.yaml           ← PostgreSQL for local runs
+│   ├── risk-analysis.md       ← start here: risks R-01…R-20, prioritised
+│   └── api-contract.md        ← resolves the risk analysis's open decisions
+├── compose.yaml               ← PostgreSQL for local runs
 ├── pom.xml
-└── src/main/              ← the application under test
-    ├── java/io/github/andyhorbach/txnqa/
-    └── resources/db/migration/   ← schema + seeded test users (Flyway)
+└── src/
+    ├── main/                  ← the application under test
+    │   ├── java/io/github/andyhorbach/txnqa/
+    │   └── resources/db/migration/   ← schema + seeded test users (Flyway)
+    └── test/java/io/github/andyhorbach/txnqa/api/
+        ├── ApiTestBase.java           ← shared fixtures and helpers
+        ├── LedgerOracle.java          ← independent DB oracle (R-18/R-19)
+        ├── MoneyIntegrityTest.java        (R-01…R-05)
+        ├── StateTransitionMatrixTest.java (R-06)
+        ├── IdempotencyTest.java           (R-07…R-09)
+        ├── ValidationTest.java            (R-10…R-12)
+        ├── RefundTest.java                (R-13…R-15)
+        ├── AuthorizationTest.java         (R-16, R-17)
+        ├── DatabaseConsistencyTest.java   (R-18, R-19)
+        └── EndToEndJourneyTest.java       (journeys)
 ```
 
 ## Running the application under test
