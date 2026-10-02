@@ -73,20 +73,26 @@ class RefundTest extends ApiTestBase {
     }
 
     @Test
-    @DisplayName("R-14: concurrent full-refund attempts can never over-refund in sum")
-    void concurrentRefundsCannotExceedOriginal() {
+    @DisplayName("R-14/R-23 + D-9: of 5 concurrent full refunds exactly one is created, and it completes")
+    void concurrentFullRefundsCreateExactlyOneThatCompletes() {
         Fixture fx = originalWithdrawal();
-        List<Response> creations = inParallel(2, () ->
+        List<Response> creations = inParallel(5, () ->
                 postTransaction(ALICE, fx.accountId(), newKey(), refundBody("40.00", "AUD", fx.withdrawalId())));
 
-        // Whatever got created in the race, complete it; over-refund must stay impossible.
-        creations.stream()
-                .filter(r -> r.statusCode() == 201)
-                .map(r -> r.<String>path("id"))
-                .forEach(id -> {
-                    transition(ALICE, id, "PROCESSING").then().statusCode(200);
-                    transition(ALICE, id, "COMPLETED"); // may be 200 or 422 depending on the race
+        List<Response> created = creations.stream().filter(r -> r.statusCode() == 201).toList();
+        List<Response> rejected = creations.stream().filter(r -> r.statusCode() != 201).toList();
+        assertThat(created).as("D-9: the cap is authoritative at creation — exactly one full refund fits").hasSize(1);
+        assertThat(rejected)
+                .as("D-9: every other concurrent full refund is rejected at creation")
+                .hasSize(4)
+                .allSatisfy(r -> {
+                    assertThat(r.statusCode()).isEqualTo(422);
+                    assertThat(r.<String>path("error.code")).isEqualTo("REFUND_EXCEEDS_ORIGINAL");
                 });
+
+        String refund = created.getFirst().path("id");
+        transition(ALICE, refund, "PROCESSING").then().statusCode(200);
+        transition(ALICE, refund, "COMPLETED").then().statusCode(200);
 
         BigDecimal completedRefunds = jdbc.sql("""
                         SELECT COALESCE(SUM(amount), 0) FROM account_transaction
@@ -94,9 +100,15 @@ class RefundTest extends ApiTestBase {
                         """)
                 .param("originalId", UUID.fromString(fx.withdrawalId()))
                 .query(BigDecimal.class).single();
-        assertThat(completedRefunds)
-                .as("sum of COMPLETED refunds can never exceed the original amount")
-                .isLessThanOrEqualTo(new BigDecimal("40.00"));
+        assertThat(completedRefunds).as("exactly the original amount was refunded").isEqualByComparingTo("40.00");
+        Long unfinishedRefunds = jdbc.sql("""
+                        SELECT COUNT(*) FROM account_transaction
+                        WHERE original_transaction_id = :originalId AND status IN ('PENDING', 'PROCESSING')
+                        """)
+                .param("originalId", UUID.fromString(fx.withdrawalId()))
+                .query(Long.class).single();
+        assertThat(unfinishedRefunds).as("R-23: no accepted refund is left unable to complete").isZero();
+        assertThat(apiBalance(ALICE, fx.accountId())).isEqualTo("100.00");
         oracle().assertLedgerConsistent(fx.accountId());
     }
 

@@ -134,11 +134,16 @@ class IdempotencyTest extends ApiTestBase {
         String winnerId = responses.stream()
                 .filter(r -> r.statusCode() == 201 && r.getHeader("Idempotency-Replay") == null)
                 .findFirst().orElseThrow().path("id");
+        assertThat(responses)
+                .as("every parallel duplicate gets a contracted outcome: 201 (created or replayed) or 409")
+                .allSatisfy(r -> assertThat(r.statusCode()).isIn(201, 409));
+        // Combined with freshCreations == 1, every other 201 is necessarily a replay.
         for (Response r : responses) {
-            if (r.statusCode() == 201 && "true".equals(r.getHeader("Idempotency-Replay"))) {
-                assertThat(r.<String>path("id")).as("replays return the winner's transaction").isEqualTo(winnerId);
-            } else if (r.statusCode() == 409) {
+            if (r.statusCode() == 409) {
                 assertThat(r.<String>path("error.code")).isEqualTo("DUPLICATE_REQUEST_IN_PROGRESS");
+            } else if (r.getHeader("Idempotency-Replay") != null) {
+                assertThat(r.getHeader("Idempotency-Replay")).isEqualTo("true");
+                assertThat(r.<String>path("id")).as("replays return the winner's transaction").isEqualTo(winnerId);
             }
         }
     }

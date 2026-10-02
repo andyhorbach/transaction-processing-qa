@@ -74,6 +74,18 @@ public class TransactionRepository {
                 .optional();
     }
 
+    /**
+     * Serializes refund creations against the same original (D-9). Scoped to the
+     * refunding account so another account's row is never locked.
+     */
+    public Optional<Transaction> lockOnAccount(UUID transactionId, UUID accountId) {
+        return jdbc.sql("SELECT * FROM account_transaction WHERE id = :id AND account_id = :accountId FOR UPDATE")
+                .param("id", transactionId)
+                .param("accountId", accountId)
+                .query(TransactionRepository::map)
+                .optional();
+    }
+
     public List<Transaction> listByAccount(UUID accountId) {
         return jdbc.sql("""
                         SELECT * FROM account_transaction

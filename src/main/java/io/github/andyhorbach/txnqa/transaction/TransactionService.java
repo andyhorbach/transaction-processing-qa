@@ -63,9 +63,7 @@ public class TransactionService {
         }
 
         try {
-            runAdvisoryChecks(account, type, amount, currency, originalId);
-            Transaction created = transactionRepository.insertPending(
-                    account.id(), type, amount, currency, originalId);
+            Transaction created = transactionOperations.createPending(account, type, amount, currency, originalId);
             idempotencyService.complete(user.id(), idempotencyKey, created.id());
             return new CreateResult(created, false);
         } catch (RuntimeException e) {
@@ -115,41 +113,5 @@ public class TransactionService {
             throw ApiException.validation("original_transaction_id is only allowed for REFUND");
         }
         return null;
-    }
-
-    /**
-     * Advisory checks (contract section 4): fast feedback at creation; the
-     * authoritative equivalents run atomically at completion in TransactionOperations.
-     */
-    private void runAdvisoryChecks(Account account, TransactionType type, BigDecimal amount,
-                                   Currency currency, UUID originalId) {
-        if (currency != account.currency()) {
-            throw new ApiException(ErrorCode.CURRENCY_MISMATCH,
-                    "Transaction currency does not match the account currency");
-        }
-        if (type.isDebit() && amount.compareTo(account.balance()) > 0) {
-            throw new ApiException(ErrorCode.INSUFFICIENT_FUNDS,
-                    "Balance is insufficient for this transaction");
-        }
-        if (type == TransactionType.REFUND) {
-            validateRefundEligibility(account, originalId, amount);
-        }
-    }
-
-    private void validateRefundEligibility(Account account, UUID originalId, BigDecimal amount) {
-        Transaction original = transactionRepository.findById(originalId)
-                .filter(t -> t.accountId().equals(account.id()))
-                .orElseThrow(() -> new ApiException(ErrorCode.REFUND_NOT_ALLOWED,
-                        "Original transaction is not refundable"));
-        if (original.status() != TransactionStatus.COMPLETED || !original.type().isRefundable()) {
-            throw new ApiException(ErrorCode.REFUND_NOT_ALLOWED,
-                    "Original transaction is not refundable");
-        }
-        BigDecimal remaining = original.amount()
-                .subtract(transactionRepository.sumNonFailedRefunds(originalId));
-        if (amount.compareTo(remaining) > 0) {
-            throw new ApiException(ErrorCode.REFUND_EXCEEDS_ORIGINAL,
-                    "Refund amount exceeds the remaining refundable amount");
-        }
     }
 }

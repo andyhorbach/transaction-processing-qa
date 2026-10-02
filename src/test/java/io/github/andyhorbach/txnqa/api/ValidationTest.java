@@ -46,14 +46,35 @@ class ValidationTest extends ApiTestBase {
         oracle().assertLedgerConsistent(account);
     }
 
-    @ParameterizedTest(name = "R-12 / D-3: amount \"{0}\" is rejected with 400")
-    @ValueSource(strings = {"10.001", "0.00", "0", "-5.00", "1,50", "abc", "", "1e2", "00.10"})
+    @ParameterizedTest(name = "R-12 / R-22 / D-10: amount \"{0}\" is rejected with 400")
+    @ValueSource(strings = {"10.001", "0.00", "0", "-5.00", "1,50", "abc", "", "1e2", "00.10",
+            "1000000.01", "123456789012345678901.00"})
     void invalidAmountsRejected(String amount) {
         String account = createAccount(ALICE, "AUD");
         postTransaction(ALICE, account, newKey(), txBody("DEPOSIT", amount, "AUD"))
                 .then().statusCode(400)
                 .body("error.code", equalTo("VALIDATION_ERROR"));
         assertThat(transactionCount(account)).isZero();
+    }
+
+    @ParameterizedTest(name = "R-22 / D-10: non-string amount {0} is rejected with 400")
+    @ValueSource(strings = {"10.5", "10", "true", "null", "{}", "[]"})
+    void nonStringAmountsRejected(String rawJsonAmount) {
+        String account = createAccount(ALICE, "AUD");
+        String body = "{\"type\":\"DEPOSIT\",\"amount\":%s,\"currency\":\"AUD\"}".formatted(rawJsonAmount);
+        postTransaction(ALICE, account, newKey(), body)
+                .then().statusCode(400)
+                .body("error.code", equalTo("VALIDATION_ERROR"));
+        assertThat(transactionCount(account)).isZero();
+    }
+
+    @Test
+    @DisplayName("D-10: the maximum 1000000.00 is accepted inclusively and returned normalized")
+    void maximumAmountAcceptedAndNormalized() {
+        String account = createAccount(ALICE, "AUD");
+        postTransaction(ALICE, account, newKey(), txBody("DEPOSIT", "1000000", "AUD"))
+                .then().statusCode(201)
+                .body("amount", equalTo("1000000.00"));
     }
 
     @Test

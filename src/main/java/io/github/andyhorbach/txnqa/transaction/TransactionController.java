@@ -20,7 +20,11 @@ public class TransactionController {
         this.transactionService = transactionService;
     }
 
-    public record CreateTransactionRequest(String type, String amount, String currency,
+    /**
+     * {@code amount} is deliberately untyped: declared as String, the JSON mapper would
+     * silently coerce a JSON number into text. Type checking happens in Money.parseAmount.
+     */
+    public record CreateTransactionRequest(String type, Object amount, String currency,
                                            String originalTransactionId) {
     }
 

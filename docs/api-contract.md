@@ -1,15 +1,8 @@
 # API Contract — Transaction Processing System
 
-This contract defines the minimal API needed to exercise the risks in [`risk-analysis.md`](risk-analysis.md). Every endpoint maps to one or more risk IDs (see §8). The open decisions D-1…D-6 from the risk analysis, plus D-7 and D-9…D-12 (identified during contract design and review), are resolved in §2. D-8 remains open (§5) and D-13 is deferred (§7). This document is the authoritative source for expected behaviour; tests assert this contract — except for the clauses listed under *Implementation status* below.
+This contract defines the minimal API needed to exercise the risks in [`risk-analysis.md`](risk-analysis.md). Every endpoint maps to one or more risk IDs (see §8). The open decisions D-1…D-6 from the risk analysis, plus D-7 and D-9…D-12 (identified during contract design and review), are resolved in §2. D-8 remains open (§5) and D-13 is deferred (§7). This document is the authoritative source for expected behaviour; tests assert this contract.
 
 **Supported transaction types in this version: `DEPOSIT`, `WITHDRAWAL`, `REFUND`, `FEE`.** See §7 for what is deferred.
-
-> **Implementation status.** Two decisions in this revision are specified but **not yet implemented**, and the test suite does **not yet assert** them. Until they are, the application's observed behaviour differs from this contract as follows:
->
-> - **D-9 (refund cap authoritative at creation):** concurrent refunds that together exceed the original can currently all be created; their completions are then all rejected with `422 REFUND_EXCEEDS_ORIGINAL` (risk R-23).
-> - **D-10 (amount contract):** JSON numbers are currently accepted and coerced (`"amount": 10.5` → `201`); amounts above `1000000.00` are currently accepted; amounts beyond the database column range (more than 17 integer digits) currently return `500` instead of `400` (risk R-22).
->
-> This note is removed when the implementation and tests for D-9 and D-10 land.
 
 ## 1. Conventions
 
